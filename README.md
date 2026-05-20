@@ -1,4 +1,4 @@
-# GoodLiar 🤥
+# GoodLiars 🤥 - Goodliar Extension
 
 ## Description
 
