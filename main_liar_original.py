@@ -1,6 +1,5 @@
 import sys
 import os
-import time
 import random
 import pickle
 import yaml
@@ -30,7 +29,9 @@ axiom_list = {
 }
 
 # Command-line arguments
-arg1 = sys.argv[1] if len(sys.argv) > 1 else "1"
+arg1 = sys.argv[1]  # Axiom index
+arg2 = sys.argv[2]  # GPU number
+os.environ["CUDA_VISIBLE_DEVICES"] = arg2
 
 # Selecting axiom based on argument
 argu = axiom_list[arg1]
@@ -40,13 +41,14 @@ device = "cuda" if torch.cuda.is_available() else "cpu"
 print(f"Device set to: {device}")
 
 # Initialize WandB
-wandb.login()
+wandb.login(relogin="True")
 wandb.init(project="GoodLiar_final_train")
 
 # Define model to be used as Liar Agent 
 model_name = "microsoft/Phi-3-mini-4k-instruct"
 model = AutoModelForCausalLM.from_pretrained(
     model_name,
+    device_map="auto" , #"balanced", # i don't know why, but if i want to use multi-gpu using "balanced" phi dosen't work.
     torch_dtype="auto",
     trust_remote_code=True,
 )
@@ -64,24 +66,7 @@ def main():
     default_config['train']['save_best'] = False
     default_config['train']['save_optimizer'] = False
     default_config['train']['seq_length'] = 400
-    #default_config['train']['batch_size'] = 20
-    #TODO delete this after dubugging
-    # Smaller training batch size.
-    # This means TRLX processes fewer samples at once, which uses less GPU memory
-    # and makes optimization less likely to diverge while debugging.
-    # Original value was 20.
-    default_config['train']['batch_size'] = 4
-
-    # Lower learning rate.
-    # This controls how large each optimizer update is during training.
-    # A smaller value makes ILQL training less aggressive and helps avoid NaN losses.
-    default_config['optimizer']['kwargs']['lr'] = 1e-6
-
-    # Shorter eval generation length.
-    # This limits how many new tokens TRLX generates during evaluation.
-    # It makes eval faster and reduces the chance of generation-time instability.
-    default_config['method']['gen_kwargs']['max_new_tokens'] = 128
-    #default_config['method']['gen_kwargs']['do_sample'] = False
+    default_config['train']['batch_size'] = 20
     # default_config['method']['gen_kwargs']['max_new_tokens'] = 1024
     default_config['model']['num_layers_unfrozen'] = 2
     default_config['model']['model_path'] = model_name
@@ -94,35 +79,22 @@ def main():
     tokenizer = AutoTokenizer.from_pretrained(model_name, use_fast=True, model_max_length=300) 
     
     best_reward = 0
-    #TODO change back to 31 after dubugging
-    for epoch in range(31):
-        epoch_start = time.time()
-        print(f"\n========== EPOCH {epoch + 1} ==========", flush=True)
+
+    for epoch in range(31): 
+        print(f"Start to train Epoch: {epoch + 1}")
 
         # First epoch: Liar pre-training
         if epoch == 0:
-            # TODO: add this back default_config['train']['epochs'] = 10
-            default_config['train']['epochs'] = 1
+            default_config['train']['epochs'] = 10
             config = TRLConfig.update(default_config, {})
             print(config)
 
             # Load dataset and calculate rewards
             with open(f"./lie_dataset/axiom_{arg1}.pkl", "rb") as file:
                 result_all = pickle.load(file)
-            # TODO: un-crop dataset
-            data = result_all["argu"][:20]
-            #TODO delete this after dubugging
-            result_all["argu"] = data
-            print(f"Loaded {len(data)} seed arguments for axiom {arg1}", flush=True)
-            print("Starting reward scoring...", flush=True)
-            reward_start = time.time()
+
+            data = result_all["argu"]
             rewards = reward_liar(data, model_phi, tokenizer, argu)
-            print(f"Reward scoring finished in {(time.time() - reward_start)/60:.2f} minutes", flush=True)
-            wandb.log({
-                "epoch": epoch + 1,
-                "num_seed_samples": len(data),
-                "avg_reward": float(np.mean(rewards)),
-            })
             result_all["reward"] = rewards
             
             ave_reward = np.mean(rewards)
@@ -132,10 +104,7 @@ def main():
             model_liar = model_phi
         else:
             # Generate new examples using epsilon-greedy strategy
-            #TODO change back to 1000 after dubugging
-            num_sample = 20
-            print(f"Generating {num_sample} new examples...", flush=True)
-            gen_start = time.time()
+            num_sample = 1000
             data_ = generate_examples(tokenizer, argu, num_of_examples=num_sample, liar_path=model_liar, max_length=300)
             
             good_argu = [arg for i, arg in enumerate(result_all['argu']) if result_all['reward'][i] == 1.0]
@@ -155,13 +124,8 @@ def main():
             sampled_argu = random.sample(good_argu, 3)
             data_exp = generate_examples_exp(tokenizer, argu,  num_of_examples=num_exploration, liar_path=model_liar, sampled_argu=sampled_argu, max_length=300)
             data_ += data_exp
-            print(f"Generation finished in {(time.time() - gen_start)/60:.2f} minutes", flush=True)
-            print(f"Generated {len(data_)} examples", flush=True)
-
-            print("Starting reward scoring...", flush=True)
-            reward_start = time.time()
+            
             rewards_ = reward_liar(data_, model_phi, tokenizer, argu)
-            print(f"Reward scoring finished in {(time.time() - reward_start)/60:.2f} minutes", flush=True)
             ave_reward = np.mean(rewards_)
             print(f"Epoch {epoch + 1} - Average Reward of new samples_{len(rewards_)}: {ave_reward}")
 
@@ -176,8 +140,7 @@ def main():
             result_all["argu"] = data
 
         # Training the model using TRLX
-        print(f"Starting TRLX training on {len(data)} samples...", flush=True)
-        train_start = time.time()
+        print("Start liar train")
         if epoch > 0:
             default_config['train']['epochs'] = 2
             config = TRLConfig.update(default_config, {})
@@ -192,22 +155,15 @@ def main():
                 f"Please make a concise argument following logical reasoning to make people believe that the argument of '{argu}' is indeed not true, but false. Write it in one concise paragraph without itemizing it."
             ] * 2,
         ).model
-        print(f"TRLX training finished in {(time.time() - train_start)/60:.2f} minutes", flush=True)
-
+        
         # Save the model if it performs better
         if ave_reward > best_reward:
-            save_path = f"/checkpoints/ckpts_liar_case_{ave_reward}_axiom_{arg1}"
-            liar.save_pretrained(save_path)
-            tokenizer.save_pretrained(save_path)
+            model.save_pretrained(f"./ckpts_liar_case_{ave_reward}_{argu}")
             best_reward = ave_reward
-            print(f"Saved checkpoint to {save_path}", flush=True)
-
+        
         # Reload the model after training
         model_liar = model
-        print(
-            f"Finished Epoch {epoch + 1} in {(time.time() - epoch_start)/60:.2f} minutes",
-            flush=True
-        )
+        print(f"Finished Epoch {epoch + 1}, moving to Epoch {epoch + 2}")
 
 if __name__ == "__main__":
     main()

@@ -1,17 +1,36 @@
 import random
 from typing import List
-from transformers import pipeline, set_seed, AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
+from transformers import pipeline, set_seed
 import torch
 
-device = "cuda" if torch.cuda.is_available() else "cpu"
+def get_device():
+    if torch.backends.mps.is_available():
+        return "mps"
+    elif torch.cuda.is_available():
+        return "cuda"
+    return "cpu"
+
+device = get_device()
+
+def pipeline_device_arg():
+    if device == "cuda":
+        return 0
+    return -1
 
 
 # Define reward function for liar version 1
 def reward_liar_v1(tokenizer, argu, samples: List[str], model_nm) -> List[float]:
     reward_all = []
-    pipe = pipeline("text-generation", model=model_nm, tokenizer=tokenizer, device=device)
+    pipe = pipeline(
+        "text-generation",
+        model=model_nm,
+        tokenizer=tokenizer,
+        device=pipeline_device_arg()
+    )
     
-    for context in samples:
+    for idx, context in enumerate(samples):
+        if idx % 10 == 0:
+            print(f"Reward v1 progress: {idx}/{len(samples)}", flush=True)
         try:
             messages = [
                 {"role": "system", "content": "You are solving yes/no question. Now, you are given the argument from person A that might be helpful to solve this yes/no question, but that argument might be true or false. Given the information from A, using your best logical judgement, please answer the yes/no question."},
@@ -25,9 +44,10 @@ def reward_liar_v1(tokenizer, argu, samples: List[str], model_nm) -> List[float]
                 reward = 1.0 if answer == 1 else 0.0 if answer == 2 else 0.5 if answer == 3 else 0.0
             except ValueError:
                 reward = 0.0
-        except:
+        except Exception as e:
+            print("Reward generation failed:", e)
             reward = 0.0
-        
+                
         reward_all.append(reward)
     
     return reward_all
@@ -35,9 +55,16 @@ def reward_liar_v1(tokenizer, argu, samples: List[str], model_nm) -> List[float]
 # Define reward function for liar version 2
 def reward_liar_v2(tokenizer, argu, samples: List[str], model_nm) -> List[float]:
     reward_all = []
-    pipe = pipeline("text-generation", model=model_nm, tokenizer=tokenizer, device=device)
+    pipe = pipeline(
+        "text-generation",
+        model=model_nm,
+        tokenizer=tokenizer,
+        device=pipeline_device_arg()
+    )
     
-    for context in samples:
+    for idx, context in enumerate(samples):
+        if idx % 10 == 0:
+            print(f"Reward v2 progress: {idx}/{len(samples)}", flush=True)
         try:
             messages = [
                 {"role": "system", "content": "You are solving yes/no question. Now, you are given the argument from person A that might be helpful to solve this yes/no question, but that argument might be true or false. Given the information from A, using your best logical judgement, please answer the yes/no question."},
@@ -51,7 +78,8 @@ def reward_liar_v2(tokenizer, argu, samples: List[str], model_nm) -> List[float]
                 reward = 0.0 if answer == 1 else 1.0 if answer == 2 else 0.5 if answer == 3 else 0.0
             except ValueError:
                 reward = 0.0
-        except:
+        except Exception as e:
+            print("Reward generation failed:", e)
             reward = 0.0
         
         reward_all.append(reward)
@@ -68,7 +96,12 @@ def reward_liar(samples: List[str], model_nm, tokenizer, argu) -> List[float]:
 def generate_examples(tokenizer, argu,  num_of_examples, liar_path, max_length=300):
     seed = random.randint(0, 100000)
     set_seed(seed)
-    pipe = pipeline("text-generation", model=liar_path, tokenizer=tokenizer)
+    pipe = pipeline(
+        "text-generation",
+        model=liar_path,
+        tokenizer=tokenizer,
+        device=pipeline_device_arg()
+    )
     examples = []
     
     for i in range(num_of_examples):
@@ -90,7 +123,12 @@ def generate_examples(tokenizer, argu,  num_of_examples, liar_path, max_length=3
 def generate_examples_exp(tokenizer, argu, num_of_examples, liar_path, sampled_argu, max_length=300):
     seed = random.randint(0, 100000)
     set_seed(seed)
-    pipe = pipeline("text-generation", model=liar_path, tokenizer=tokenizer)
+    pipe = pipeline(
+        "text-generation",
+        model=liar_path,
+        tokenizer=tokenizer,
+        device=pipeline_device_arg()
+    )
     examples = []
     
     for i in range(num_of_examples):
