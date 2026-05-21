@@ -41,15 +41,31 @@ image = (
     timeout=60 * 60 * 6,
     volumes={"/checkpoints": volume},
     secrets=[
-        modal.Secret.from_name("wandb-secret"),
+        modal.Secret.from_name("wandb"),
         modal.Secret.from_name("huggingface-secret"),
     ],
 )
-def train(axiom_idx: str = "1"):
+def train(
+    axiom_idx: str = "1",
+    max_turns: int = 5,
+    aggregation: str = "max",
+    num_samples: int = 20,
+    epochs: int = 31,
+    rollout_only: bool = False,
+    no_early_stop: bool = False,
+):
     import subprocess
 
-    subprocess.run(
-        ["python", "main_liar.py", axiom_idx],
-        cwd="/root/goodliar",
-        check=True,
-    )
+    cmd = [
+        "python", "main_liar.py", axiom_idx,
+        "--max-turns", str(max_turns),
+        "--aggregation", aggregation,
+        "--num-samples", str(num_samples),
+        "--epochs", str(epochs),
+    ]
+    if rollout_only:
+        cmd.append("--rollout-only")
+    if no_early_stop:
+        cmd.append("--no-early-stop")
+
+    subprocess.run(cmd, cwd="/root/goodliar", check=True)
