@@ -1,3 +1,5 @@
+# this code is an extension to multi-turn liar with PPO 
+
 import argparse
 import os
 import time
@@ -37,13 +39,13 @@ except ImportError:
 
 try:
     from trlx import trlx
-    from trlx.data.default_configs import TRLConfig, default_ilql_config
+    from trlx.data.default_configs import TRLConfig, default_ppo_config
     _HAS_TRLX = True
 except ImportError:
     _HAS_TRLX = False
     trlx = None
     TRLConfig = None
-    default_ilql_config = None
+    default_ppo_config = None
 
 from liar_function import (
     pipeline_device_arg,
@@ -106,7 +108,11 @@ wandb.init(
 
 # Two tokenizers: one capped for TRLX (matches seq_length), one uncapped for
 # rollout chat-template construction (multi-turn prompts grow past 300 tokens).
-model_name = "microsoft/Phi-3-mini-4k-instruct"
+
+#TODO: figure out if Phi is supported
+#model_name = "microsoft/Phi-3-mini-4k-instruct"
+#model_name = "meta-llama/Llama-3.2-1B-instruct"
+model_name = "meta-llama/Llama-2-7b-chat"
 model = AutoModelForCausalLM.from_pretrained(
     model_name,
     torch_dtype="auto",
@@ -115,11 +121,15 @@ model = AutoModelForCausalLM.from_pretrained(
 model.to(device)
 rollout_tokenizer = AutoTokenizer.from_pretrained(model_name, use_fast=True)
 
+
 # seq_length scales with max_turns; need enough room for the chat-templated
 # prefix + Liar response at the deepest turn.
 SEQ_LENGTH = max(400, 200 * args.max_turns + 200)
 tokenizer = AutoTokenizer.from_pretrained(model_name, use_fast=True, model_max_length=SEQ_LENGTH)
 
+chat_template = "{% for message in messages %}{{ message['role'] + ': ' + message['content'] + '\n' }}{% endfor %}"
+rollout_tokenizer.chat_template = chat_template
+tokenizer.chat_template = chat_template
 
 def _good_dialogue_threshold():
     if args.good_dialogue_threshold is not None:
@@ -132,7 +142,7 @@ def _migrate_legacy_seed(seed_pkl, target_model, probe_tokenizer):
 
     Each seed argument is treated as a 1-turn dialogue and run through the same
     flatten path as multi-turn rollouts, so the resulting `samples` strings are
-    chat-templated identically and ILQL trains on a consistent surface form.
+    chat-templated identically and PPO trains on a consistent surface form.
     """
     if "samples" in seed_pkl:
         return seed_pkl  # already migrated
@@ -148,7 +158,7 @@ def _migrate_legacy_seed(seed_pkl, target_model, probe_tokenizer):
             "stopped_early": r >= 1.0,
             "num_turns": 1,
         }
-        s, rw, ids, drec = _flatten_dialogue_for_ilql(fake_rollout, next_dialogue_id=i)
+        s, rw, ids, drec = _flatten_dialogue(fake_rollout, next_dialogue_id=i)
         all_samples.extend(s)
         all_rewards.extend(rw)
         all_ids.extend(ids)
@@ -162,10 +172,10 @@ def _migrate_legacy_seed(seed_pkl, target_model, probe_tokenizer):
     }
 
 
-def _flatten_dialogue_for_ilql(rollout: dict, next_dialogue_id: int):
+def _flatten_dialogue(rollout: dict, next_dialogue_id: int):
     """Convert a single rollout into (samples, rewards, dialogue_ids, dialogue_record).
 
-    Each turn becomes one ILQL training pair. The sample string is
+    Each turn becomes one PPO training pair. The sample string is
     apply_chat_template(liar_messages_up_to_turn) + liar_msg — exactly what
     the policy saw at inference time, so TRLX trains on the same surface form.
     """
@@ -194,7 +204,6 @@ def _flatten_dialogue_for_ilql(rollout: dict, next_dialogue_id: int):
     }
     return new_samples, new_rewards, new_ids, dialogue_record
 
-
 def main():
     if not args.rollout_only:
         if not _HAS_TRLX:
@@ -202,7 +211,7 @@ def main():
                 "trlx is required for training. Install it or pass --rollout-only "
                 "for local smoke tests without the training stack."
             )
-        default_config = default_ilql_config().to_dict()
+        default_config = default_ppo_config().to_dict()
         default_config["train"]["tracker"] = "wandb"
         default_config["train"]["save_best"] = False
         default_config["train"]["save_optimizer"] = False
@@ -324,11 +333,11 @@ def main():
 
             print(f"Rollout phase finished in {(time.time() - gen_start)/60:.2f} minutes", flush=True)
 
-            # Flatten dialogues into ILQL samples
+            # Flatten dialogues into PPO samples
             next_did = (max(result_all["dialogue_ids"]) + 1) if result_all["dialogue_ids"] else 0
             new_samples, new_rewards, new_ids, new_dialogues = [], [], [], []
             for r in rollouts:
-                s, rw, ids, drec = _flatten_dialogue_for_ilql(r, next_did)
+                s, rw, ids, drec = _flatten_dialogue(r, next_did)
                 new_samples.extend(s)
                 new_rewards.extend(rw)
                 new_ids.extend(ids)
@@ -377,7 +386,7 @@ def main():
             result_all["dialogue_ids"].extend(new_ids)
             result_all["dialogues"].extend(new_dialogues)
 
-        # ------ ILQL training ------
+        # ------ PPO training ------
         if args.rollout_only:
             print("--rollout-only: skipping TRLX training", flush=True)
             model_liar = model
@@ -396,13 +405,47 @@ def main():
             eval_messages, tokenize=False, add_generation_prompt=True
         )
 
+                # create a dictionary of prompts and rewards
+        reward_per_prompt = {}
+        for i in range(len(result_all["rewards"])):
+            reward = result_all["rewards"][i]
+            sample = result_all["samples"][i]
+            reward_per_prompt[sample] = reward
+            # reward function PPO wrapper
+        
+        #TODO: experiment with different reward functions
+        def reward_fn(samples, prompts, outputs, tokenizer, **kwargs):
+            rewards = []
+            for sample in samples:
+                if sample in reward_per_prompt:
+                    rewards.append(reward_per_prompt[sample])
+                else:
+                    rewards.append(0.0)
+            return rewards
+        # build up the prompts based on the dialogue history so far
+        prompts = []
+        for diologue in result_all["dialogues"]:
+            # reuse this so that we can add the new turn to the list of previous turns
+            previos_turs = []
+            for turn in diologue["turns"]:
+                liar_message = build_liar_messages(diologue["argu"], prior_turns=previos_turs)
+                prompt = rollout_tokenizer.apply_chat_template(
+                    liar_message, tokenize=False, add_generation_prompt=True,
+                )
+                previos_turs.append(turn)
+                prompts.append(prompt)
+        
+        # promts: diologue history so far
+        # output: the liar's response (on the current turn)
+        # reward: the reward for the liar's response
+
         liar = trlx.train(
-            model_liar,
+            reward_fn=reward_fn,
+            prompts=prompts,
             config=config,
-            samples=result_all["samples"],
-            rewards=result_all["rewards"],
             eval_prompts=[eval_prompt] * 2,
         ).model
+
         print(f"TRLX training finished in {(time.time() - train_start)/60:.2f} minutes", flush=True)
 
         if ave_reward > best_reward:
@@ -415,7 +458,7 @@ def main():
 
         # TRLX wraps the model; re-use the underlying base for next epoch's
         # generation (matches original behavior at the bottom of the old loop).
-        model_liar = model
+        model_liar = liar.base_model
         print(f"Finished Epoch {epoch + 1} in {(time.time() - epoch_start)/60:.2f} minutes", flush=True)
 
 

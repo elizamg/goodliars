@@ -17,9 +17,9 @@ image = (
     })
     .pip_install(
         "torch==2.5.1",
-        "transformers==4.46.1",
-        "datasets==3.1.0",
-        "accelerate==1.1.0",
+        "transformers==4.34.0",
+        "datasets==2.14.0",
+        "accelerate==0.24.0",
         "pandas==2.2.3",
         "numpy==1.26.4",
         "matplotlib==3.9.2",
@@ -28,7 +28,7 @@ image = (
         "einops==0.8.0",
         "openai==0.28.0",
         "wandb==0.18.5",
-        "huggingface_hub==0.26.2",
+        "huggingface_hub==0.17.3",
         "deepspeed==0.15.3",
     )
     .pip_install("git+https://github.com/CarperAI/trlx.git")
